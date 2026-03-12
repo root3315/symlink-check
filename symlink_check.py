@@ -4,6 +4,7 @@ symlink-check: Verify symbolic links and their targets.
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -92,7 +93,7 @@ def check_single_symlink(path: Path, verbose: bool = False) -> int:
     return 1 if info["is_broken"] else 0
 
 
-def scan_directory(directory: Path, recursive: bool = False, verbose: bool = False) -> Tuple[int, int, int]:
+def scan_directory(directory: Path, recursive: bool = False, verbose: bool = False, json_output: bool = False) -> Tuple[int, int, int]:
     """Scan directory for symbolic links and check them."""
     total = 0
     ok_count = 0
@@ -106,7 +107,8 @@ def scan_directory(directory: Path, recursive: bool = False, verbose: bool = Fal
     symlinks = [p for p in symlink_list if p.is_symlink()]
 
     if not symlinks:
-        print(f"No symbolic links found in {directory}")
+        if not json_output:
+            print(f"No symbolic links found in {directory}")
         return 0, 0, 0
 
     for link in sorted(symlinks):
@@ -121,9 +123,10 @@ def scan_directory(directory: Path, recursive: bool = False, verbose: bool = Fal
                 ok_count += 1
                 status_marker = "[OK]"
 
-            print(f"{status_marker} {link}")
+            if not json_output:
+                print(f"{status_marker} {link}")
 
-            if verbose and info["target"]:
+            if verbose and info["target"] and not json_output:
                 target_display = info["target"]
                 if info["target_exists"]:
                     resolved = link.resolve()
@@ -132,7 +135,8 @@ def scan_directory(directory: Path, recursive: bool = False, verbose: bool = Fal
                 print(f"       Target: {target_display}")
                 print(f"       Type: {info['target_type'] or 'unknown'}")
         else:
-            print(f"[SKIP] {link}: {info.get('error', 'unknown')}")
+            if not json_output:
+                print(f"[SKIP] {link}: {info.get('error', 'unknown')}")
 
     return total, ok_count, broken_count
 
@@ -199,6 +203,11 @@ Examples:
         action="store_true",
         help="Only output summary statistics"
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results in JSON format"
+    )
 
     args = parser.parse_args()
 
@@ -209,16 +218,34 @@ Examples:
     target = args.path
 
     if not target.exists() and not target.is_symlink():
+        if args.json:
+            output = {"error": f"Path does not exist: {str(target)}"}
+            print(json.dumps(output, indent=2))
+            sys.exit(1)
         print(f"[ERROR] Path does not exist: {target}", file=sys.stderr)
         sys.exit(1)
 
     if args.directory or target.is_dir():
         if not target.is_dir():
+            if args.json:
+                output = {"error": f"Not a directory: {str(target)}"}
+                print(json.dumps(output, indent=2))
+                sys.exit(1)
             print(f"[ERROR] Not a directory: {target}", file=sys.stderr)
             sys.exit(1)
 
         if args.broken:
             broken = find_broken_symlinks(target, args.recursive)
+            if args.json:
+                output = {
+                    "directory": str(target),
+                    "recursive": args.recursive,
+                    "broken_count": len(broken),
+                    "broken_links": [str(link) for link in broken]
+                }
+                print(json.dumps(output, indent=2))
+                sys.exit(0 if not broken else 1)
+            
             if not args.quiet:
                 for link in broken:
                     print(f"[BROKEN] {link}")
@@ -226,13 +253,22 @@ Examples:
                 print(f"\nFound {len(broken)} broken symbolic link(s)")
             sys.exit(0 if not broken else 1)
 
-        if not args.quiet:
+        if not args.quiet and not args.json:
             mode = "Recursive " if args.recursive else ""
             print(f"{mode}scanning directory: {target}\n")
 
-        total, ok, broken = scan_directory(target, args.recursive, args.verbose)
+        total, ok, broken = scan_directory(target, args.recursive, args.verbose, args.json)
 
-        if not args.quiet:
+        if args.json:
+            output = {
+                "directory": str(target),
+                "recursive": args.recursive,
+                "total": total,
+                "ok": ok,
+                "broken": broken
+            }
+            print(json.dumps(output, indent=2))
+        elif not args.quiet:
             print(f"\nSummary: {total} total, {ok} OK, {broken} broken")
 
         sys.exit(0 if broken == 0 else 1)
@@ -240,15 +276,65 @@ Examples:
     elif target.is_symlink() or target.is_file():
         if args.broken:
             info = get_symlink_info(target)
+            if args.json:
+                output = {
+                    "path": str(target),
+                    "is_broken": info["is_symlink"] and info["is_broken"]
+                }
+                print(json.dumps(output, indent=2))
+                sys.exit(1 if output["is_broken"] else 0)
+            
             if info["is_symlink"] and info["is_broken"]:
                 print(f"[BROKEN] {target}")
                 sys.exit(1)
             sys.exit(0)
 
-        exit_code = check_single_symlink(target, args.verbose)
-        sys.exit(exit_code)
+        info = get_symlink_info(target)
+        
+        if args.json:
+            output = {
+                "path": str(target),
+                "is_symlink": info["is_symlink"],
+                "target": info["target"],
+                "target_exists": info["target_exists"],
+                "target_type": info["target_type"],
+                "is_broken": info["is_broken"],
+                "is_absolute": info["is_absolute"],
+                "error": info["error"]
+            }
+            print(json.dumps(output, indent=2))
+            sys.exit(1 if info["is_broken"] else 0)
+
+        if info["error"]:
+            print(f"[ERROR] {target}: {info['error']}")
+            sys.exit(1)
+
+        if not info["is_symlink"]:
+            print(f"[SKIP] {target}: {info['error']}")
+            sys.exit(0)
+
+        status = "OK" if not info["is_broken"] else "BROKEN"
+        status_marker = "[OK]" if not info["is_broken"] else "[BROKEN]"
+
+        print(f"{status_marker} {target}")
+
+        if verbose:
+            target_display = info["target"]
+            if info["target_exists"]:
+                resolved = target.resolve()
+                if str(resolved) != info["target"]:
+                    target_display += f" -> {resolved}"
+            print(f"       Target: {target_display}")
+            print(f"       Type: {info['target_type'] or 'unknown'}")
+            print(f"       Absolute: {'yes' if info['is_absolute'] else 'no'}")
+
+        sys.exit(1 if info["is_broken"] else 0)
 
     else:
+        if args.json:
+            output = {"error": f"Invalid path: {str(target)}"}
+            print(json.dumps(output, indent=2))
+            sys.exit(1)
         print(f"[ERROR] Invalid path: {target}", file=sys.stderr)
         sys.exit(1)
 

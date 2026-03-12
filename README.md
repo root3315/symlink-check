@@ -38,6 +38,12 @@ Quiet mode (summary only):
 python symlink_check.py -d /path/to/dir --quiet
 ```
 
+JSON output:
+```bash
+python symlink_check.py --json /path/to/symlink
+python symlink_check.py --json -d /path/to/dir
+```
+
 ## Output
 
 ```
